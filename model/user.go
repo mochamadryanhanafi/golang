@@ -17,21 +17,46 @@ type User struct {
 }
 
 func (u *User) BeforeCreate(tx *gorm.DB) (err error) {
-	u.ID = uuid.New()
+	if u.ID == uuid.Nil {
+		u.ID = uuid.New()
+	}
 	return
 }
 
 type RegisterInput struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8"`
 }
 
 type LoginInput struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
 }
 
 type VerifyOTPInput struct {
-	Email string `json:"email" binding:"required,email"`
-	OTP   string `json:"otp" binding:"required"`
+	Email string `json:"email" validate:"required,email"`
+	OTP   string `json:"otp" validate:"required,len=6"`
 }
+
+type RefreshTokenInput struct {
+	Token string `json:"refresh_token" validate:"required"`
+}
+
+type LogoutInput struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+type ForgotPasswordInput struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+type ResetPasswordInput struct {
+	Token       string `json:"token" validate:"required"`
+	NewPassword string `json:"new_password" validate:"required,min=8"`
+}
+
+type ResendOTPInput struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+type ContextKey string

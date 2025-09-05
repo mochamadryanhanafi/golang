@@ -27,6 +27,14 @@ func (r *UserRepo) FindByEmail(ctx context.Context, email string) (*model.User, 
 	return &user, nil
 }
 
+func (r *UserRepo) FindByID(ctx context.Context, id string) (*model.User, error) {
+	var user model.User
+	if err := r.DB.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (r *UserRepo) Update(ctx context.Context, user *model.User) error {
 	return r.DB.WithContext(ctx).Save(user).Error
 }

@@ -4,33 +4,25 @@ import (
 	"auth-service/config"
 	"auth-service/controller"
 	"auth-service/middleware"
-	"auth-service/repository"
-	"auth-service/service"
-	"net/http"
 
 	"github.com/go-chi/chi/v5"
 )
 
-func SetupRoutes(r *chi.Mux) {
-	// Ambil koneksi database dari config
-	db := config.GetDB()
+func SetupRoutes(r *chi.Mux, authController *controller.AuthController, cfg *config.Config) {
+	r.Route("/auth", func(r chi.Router) {
+		r.Post("/register", authController.Register)
+		r.Post("/login", authController.Login)
+		r.Post("/verify-otp", authController.VerifyOTP)
+		r.Post("/token/refresh", authController.RefreshToken)
+		r.Post("/forgot-password", authController.ForgotPassword)
+		r.Post("/reset-password", authController.ResetPassword)
+		r.Post("/resend-otp", authController.ResendOTP)
+	})
 
-	// Inisialisasi repositori dan service
-	userRepo := repository.NewUserRepo(db)
-	redisRepo := repository.NewRedisRepo() // asumsi tidak butuh DB
-	authService := service.NewAuthService(userRepo, redisRepo)
-	authController := controller.NewAuthController(authService)
+	r.Route("/api", func(r chi.Router) {
+		r.Use(middleware.JWTMiddleware(cfg.JwtSecret))
 
-	// Public routes
-	r.Post("/register", authController.Register)
-	r.Post("/login", authController.Login)
-	r.Post("/verify-otp", authController.VerifyOTP)
-
-	// Protected route
-	r.Group(func(protected chi.Router) {
-		protected.Use(middleware.JWTMiddleware)
-		protected.Get("/profile", func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("You are authenticated!"))
-		})
+		r.Post("/auth/logout", authController.Logout)
+		r.Get("/profile", authController.GetProfile)
 	})
 }

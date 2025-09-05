@@ -6,28 +6,35 @@ import (
 	"auth-service/repository"
 	"auth-service/utils"
 	"context"
-	"errors"
-	"time"
+	"fmt"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthService struct {
-	UserRepo  *repository.UserRepo
-	RedisRepo *repository.RedisRepo
+	userRepo  *repository.UserRepo
+	redisRepo *repository.RedisRepo
+	cfg       *config.Config
 }
 
-func NewAuthService(userRepo *repository.UserRepo, redisRepo *repository.RedisRepo) *AuthService {
+func NewAuthService(userRepo *repository.UserRepo, redisRepo *repository.RedisRepo, cfg *config.Config) *AuthService {
 	return &AuthService{
-		UserRepo:  userRepo,
-		RedisRepo: redisRepo,
+		userRepo:  userRepo,
+		redisRepo: redisRepo,
+		cfg:       cfg,
 	}
 }
 
 func (s *AuthService) Register(ctx context.Context, input model.RegisterInput) error {
+	_, err := s.userRepo.FindByEmail(ctx, input.Email)
+	if err == nil {
+		return model.ErrUserAlreadyExists
+	}
+
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not hash password: %w", err)
 	}
 
 	user := model.User{
@@ -36,72 +43,146 @@ func (s *AuthService) Register(ctx context.Context, input model.RegisterInput) e
 		IsVerified:   false,
 	}
 
-	err = s.UserRepo.Create(ctx, &user)
-	if err != nil {
-		return err
+	if err := s.userRepo.Create(ctx, &user); err != nil {
+		return fmt.Errorf("could not create user: %w", err)
 	}
 
-	otp := utils.GenerateOTP()
-	err = s.RedisRepo.SaveOTP(ctx, user.Email, otp, 5*time.Minute)
-	if err != nil {
-		return err
-	}
-
-	return utils.SendOTPEmail(user.Email, otp)
+	return s.sendOTP(ctx, user.Email)
 }
 
-func (s *AuthService) Login(ctx context.Context, input model.LoginInput) error {
-	user, err := s.UserRepo.FindByEmail(ctx, input.Email)
+func (s *AuthService) Login(ctx context.Context, input model.LoginInput) (map[string]string, error) {
+	user, err := s.userRepo.FindByEmail(ctx, input.Email)
 	if err != nil {
-		return errors.New("email atau password salah")
+		return nil, model.ErrInvalidCredentials
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password))
-	if err != nil {
-		return errors.New("email atau password salah")
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)); err != nil {
+		return nil, model.ErrInvalidCredentials
 	}
 
-	otp := utils.GenerateOTP()
-	err = s.RedisRepo.SaveOTP(ctx, user.Email, otp, 5*time.Minute)
-	if err != nil {
-		return err
+	if !user.IsVerified {
+		s.sendOTP(ctx, user.Email)
+		return nil, model.ErrAccountNotVerified
 	}
 
-	return utils.SendOTPEmail(user.Email, otp)
+	return s.generateTokens(ctx, user)
 }
 
 func (s *AuthService) VerifyOTP(ctx context.Context, email, otp string) (map[string]string, error) {
-	isValid := s.RedisRepo.VerifyOTP(ctx, email, otp)
+	isValid, err := s.redisRepo.VerifyOTP(ctx, email, otp)
+	if err != nil {
+		return nil, fmt.Errorf("could not verify otp from redis: %w", err)
+	}
 	if !isValid {
-		return nil, errors.New("OTP salah atau telah kedaluwarsa")
+		return nil, model.ErrInvalidOTP
 	}
 
-	user, err := s.UserRepo.FindByEmail(ctx, email)
+	user, err := s.userRepo.FindByEmail(ctx, email)
 	if err != nil {
-		return nil, err
+		return nil, model.ErrUserNotFound
 	}
 
 	if !user.IsVerified {
 		user.IsVerified = true
-		err = s.UserRepo.Update(ctx, user)
-		if err != nil {
-			return nil, err
+		if err := s.userRepo.Update(ctx, user); err != nil {
+			return nil, fmt.Errorf("could not update user verification status: %w", err)
 		}
 	}
 
-	accessToken, err := utils.GenerateJWT(user.ID, config.AppConfig.JwtSecret, 15*time.Minute)
+	return s.generateTokens(ctx, user)
+}
+
+func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (map[string]string, error) {
+	userID, err := s.redisRepo.GetUserIDByRefreshToken(ctx, refreshToken)
 	if err != nil {
-		return nil, err
+		return nil, model.ErrInvalidToken
 	}
 
-	refreshToken, err := utils.GenerateRefreshToken()
+	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, model.ErrInvalidToken
 	}
 
-	err = s.RedisRepo.SaveRefreshToken(ctx, user.ID.String(), refreshToken, 7*24*time.Hour)
+	if err := s.redisRepo.DeleteRefreshToken(ctx, refreshToken); err != nil {
+		fmt.Printf("warning: could not delete old refresh token: %v", err)
+	}
+
+	return s.generateTokens(ctx, user)
+}
+
+func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
+	return s.redisRepo.DeleteRefreshToken(ctx, refreshToken)
+}
+
+func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
+	user, err := s.userRepo.FindByEmail(ctx, email)
 	if err != nil {
-		return nil, err
+		return nil
+	}
+
+	token := utils.GenerateSecureRandomString(32)
+	if err := s.redisRepo.SaveResetToken(ctx, token, user.Email, s.cfg.ResetPasswordTokenDuration); err != nil {
+		return fmt.Errorf("could not save reset token: %w", err)
+	}
+
+	return utils.SendResetPasswordEmail(user.Email, token, s.cfg)
+}
+
+func (s *AuthService) ResetPassword(ctx context.Context, input model.ResetPasswordInput) error {
+	email, err := s.redisRepo.GetEmailByResetToken(ctx, input.Token)
+	if err != nil {
+		return model.ErrInvalidToken
+	}
+
+	user, err := s.userRepo.FindByEmail(ctx, email)
+	if err != nil {
+		return model.ErrUserNotFound
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("could not hash new password: %w", err)
+	}
+
+	user.PasswordHash = string(hashedPassword)
+	if err := s.userRepo.Update(ctx, user); err != nil {
+		return fmt.Errorf("could not update password: %w", err)
+	}
+
+	s.redisRepo.DeleteResetToken(ctx, input.Token)
+	return nil
+}
+
+func (s *AuthService) ResendOTP(ctx context.Context, email string) error {
+	user, err := s.userRepo.FindByEmail(ctx, email)
+	if err != nil {
+		return model.ErrUserNotFound
+	}
+	if user.IsVerified {
+		return model.NewAppError(400, "Account is already verified")
+	}
+	return s.sendOTP(ctx, email)
+}
+
+// --- Helper Functions ---
+
+func (s *AuthService) sendOTP(ctx context.Context, email string) error {
+	otp := utils.GenerateOTP(6)
+	if err := s.redisRepo.SaveOTP(ctx, email, otp, s.cfg.OTPDuration); err != nil {
+		return fmt.Errorf("could not save OTP: %w", err)
+	}
+	return utils.SendOTPEmail(email, otp, s.cfg)
+}
+
+func (s *AuthService) generateTokens(ctx context.Context, user *model.User) (map[string]string, error) {
+	accessToken, err := utils.GenerateJWT(user.ID.String(), s.cfg.JwtSecret, s.cfg.AccessTokenDuration)
+	if err != nil {
+		return nil, fmt.Errorf("could not generate access token: %w", err)
+	}
+
+	refreshToken := uuid.New().String()
+	if err := s.redisRepo.SaveRefreshToken(ctx, refreshToken, user.ID.String(), s.cfg.RefreshTokenDuration); err != nil {
+		return nil, fmt.Errorf("could not save refresh token: %w", err)
 	}
 
 	return map[string]string{
