@@ -53,12 +53,12 @@ func (s *AuthService) Register(ctx context.Context, input model.RegisterInput) e
 func (s *AuthService) Login(ctx context.Context, input model.LoginInput) error {
 	user, err := s.UserRepo.FindByEmail(ctx, input.Email)
 	if err != nil {
-		return errors.New("invalid credentials")
+		return errors.New("email atau password salah")
 	}
 
 	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password))
 	if err != nil {
-		return errors.New("invalid credentials")
+		return errors.New("email atau password salah")
 	}
 
 	otp := utils.GenerateOTP()
@@ -73,7 +73,7 @@ func (s *AuthService) Login(ctx context.Context, input model.LoginInput) error {
 func (s *AuthService) VerifyOTP(ctx context.Context, email, otp string) (map[string]string, error) {
 	isValid := s.RedisRepo.VerifyOTP(ctx, email, otp)
 	if !isValid {
-		return nil, errors.New("invalid or expired OTP")
+		return nil, errors.New("OTP salah atau telah kedaluwarsa")
 	}
 
 	user, err := s.UserRepo.FindByEmail(ctx, email)
@@ -83,7 +83,10 @@ func (s *AuthService) VerifyOTP(ctx context.Context, email, otp string) (map[str
 
 	if !user.IsVerified {
 		user.IsVerified = true
-		s.UserRepo.Update(ctx, user)
+		err = s.UserRepo.Update(ctx, user)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	accessToken, err := utils.GenerateJWT(user.ID, config.AppConfig.JwtSecret, 15*time.Minute)

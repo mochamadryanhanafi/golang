@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/joho/godotenv" // untuk baca .env
+	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
