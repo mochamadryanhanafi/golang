@@ -17,14 +17,14 @@ import (
 
 type Config struct {
 	Port                       string
-	DB                         *gorm.DB
-	Redis                      *redis.Client
-	JwtSecret                  string `validate:"required"`
-	SmtpHost                   string `validate:"required"`
-	SmtpPort                   string `validate:"required"`
-	SmtpUser                   string `validate:"required"`
-	SmtpPassword               string `validate:"required"`
-	AppEmail                   string `validate:"required,email"`
+	DB                         *gorm.DB      `validate:"-"`
+	Redis                      *redis.Client `validate:"-"`
+	JwtSecret                  string        `validate:"required"`
+	SmtpHost                   string        `validate:"required"`
+	SmtpPort                   string        `validate:"required"`
+	SmtpUser                   string        `validate:"required"`
+	SmtpPassword               string        `validate:"required"`
+	AppEmail                   string        `validate:"required,email"`
 	AccessTokenDuration        time.Duration
 	RefreshTokenDuration       time.Duration
 	OTPDuration                time.Duration
